@@ -1,0 +1,16 @@
+.snakemake
+.vscode
+.env
+
+tmp
+data
+models
+plots
+slurm_logs
+
+license.txt
+meld_license.txt
+*.sif
+*.pyc
+__pycache__
+.ipynb_checkpoints

@@ -1,0 +1,6 @@
+local-cores: 1
+retries: 0
+keep-going: True
+use-conda: True
+rerun-triggers: [mtime] # not code or params or input
+keep-incomplete: True

@@ -1,0 +1,500 @@
+
+# MELD-graph pipeline for the UHF MELD project.
+#
+# Run with:  snakemake -s Snakefile_meldgraph [--profile profiles/snakemake_profile_csd3]
+#
+# Folder layout under data/:
+#   meld_graph_scaffold/          the MELD data folder downloaded once by prepare_classifier.py
+#                                 (meld_params/ incl. distributed_combat/, models/); no subject data
+#
+#   meld_graph/<site>/<B0>/       input/ + the FreeSurfer segmentation outputs
+#                                 (output/fs_outputs) + the harmonised predictions.
+#                                 meld_params/ and models/ are from the scaffold.
+#
+#   meld_graph_noharmo/<site>/<B0>/  hardlinked copy of the above + unharmonised predictions
+#
+
+# set shell prefix from config if exists
+if 'shell_prefix' in config.keys():
+    default = 'set -euo pipefail;\n'
+    shell.prefix(config['shell_prefix'] + '; ' + default)
+else:
+    shell.prefix('set -euo pipefail;\nAPPTAINER_BINDPATH=""')
+
+wildcard_constraints:
+    # site doesn't contain slashes
+    site="[^/]+",
+    # field strength / acquisition condition
+    B0="3T|3T_fastsurfer|3T_FLAIR|7T|7T_fastsurfer|7T_nouhf|7T_FLAIR|7T_CP|7T_CP_nouhf|7T_CP_FLAIR|7T_pTx|7T_pTx_nouhf|7T_pTx_FLAIR"
+
+rule download_meld_graph_scaffold:
+    # download the MELD data (meld_params/, models/) once into data/meld_graph_scaffold/;
+    # every data/meld_graph/<site>/<B0>/ gets a copy of it from create_meld_graph_folder
+    output:
+        'data/meld_graph_scaffold/.download.done'
+    localrule: True
+    shell:
+        r"""
+        rm -rf data/meld_graph_scaffold/
+        mkdir -p data/meld_graph_scaffold/
+        export APPTAINER_BINDPATH=data/meld_graph_scaffold/:/data,license.txt:/license.txt:ro,meld_license.txt:/meld_license.txt:ro
+        export APPTAINERENV_FS_LICENSE=/license.txt
+        export APPTAINERENV_MELD_LICENSE=/meld_license.txt
+        RULE_TMPDIR="$(mktemp -d $TMPDIR/snakemake-apptainer.XXXXXX)"
+        cleanup() {{
+           rm -rf "$RULE_TMPDIR"
+        }}
+        trap cleanup EXIT INT TERM
+        export APPTAINER_BINDPATH=$APPTAINER_BINDPATH,$RULE_TMPDIR:/tmp
+        apptainer exec --containall meld_graph.sif /bin/bash -c "cd /app && python scripts/new_patient_pipeline/prepare_classifier.py"
+
+        # drop the bundled test subject and demographics, keep meld_params/ and models/
+        rm -rf data/meld_graph_scaffold/input 
+        rm -rf data/meld_graph_scaffold/output
+        rm -f data/meld_graph_scaffold/demographics_file.csv
+        rm -f data/meld_graph_scaffold/list_subjects.txt
+        rm -f data/meld_graph_scaffold/README.md
+
+        # prepare_classifier.py aborts with exit code 0 if the data already exists, so check explicitly
+        test -n "$(ls -A data/meld_graph_scaffold/meld_params/)"
+        test -n "$(ls -A data/meld_graph_scaffold/models/)"
+
+        date > {output}
+        """
+
+rule create_meld_graph_folder:
+    input:
+        ancient('data/meld_graph_scaffold/.download.done')
+    output:
+        'data/meld_graph/{site}/{B0}/.create.done'
+    localrule: True
+    shell:
+        """
+        # non-destructive: an existing input/ (subject data) and output/ (the expensive
+        # FreeSurfer segmentations) are preserved, but meld_params/ and models/ will be
+        # replaced with the scaffold versions
+        mkdir -p data/meld_graph/{wildcards.site}/{wildcards.B0}/
+        rm -rf data/meld_graph/{wildcards.site}/{wildcards.B0}/meld_params/
+        rm -rf data/meld_graph/{wildcards.site}/{wildcards.B0}/models/
+        cp -r data/meld_graph_scaffold/meld_params data/meld_graph_scaffold/models data/meld_graph/{wildcards.site}/{wildcards.B0}/
+        date > {output}
+        """
+
+checkpoint copy_7T_rory_meld_graph:
+    input:
+        ancient('data/meld_graph/7T_rory/{B0}/.create.done'),
+    output:
+        directory('data/meld_graph/7T_rory/{B0}/input/'),
+    localrule: True
+    shell:
+        """
+        python -m prepare_data_meldgraph.prepare_7T_rory --meld_graph --B0_condition {wildcards.B0}
+        """
+
+checkpoint copy_RICE_meld_graph:
+    input:
+        ancient('data/meld_graph/RICE/{B0}/.create.done'),
+    output:
+        directory('data/meld_graph/RICE/{B0}/input/')
+    localrule: True
+    shell:
+        """
+        python -m prepare_data_meldgraph.prepare_RICE --meld_graph --B0_condition {wildcards.B0}
+        """
+
+rule select_bonn_7T_sessions_files:
+    output:
+        'data/raw/bonn_7T/bids/derivatives/3T_7T_MELD_paths.csv',
+    localrule: True
+    shell:
+        """
+        python -m prepare_data.prepare_bonn_7T --select_sessions_and_files
+        """ 
+
+checkpoint copy_bonn_7T_meld_graph:
+    input:
+        'data/raw/bonn_7T/bids/derivatives/3T_7T_MELD_paths.csv',
+        ancient('data/meld_graph/bonn_7T/{B0}/.create.done'),
+    output:
+        directory('data/meld_graph/bonn_7T/{B0}/input/')
+    localrule: True
+    shell:
+        """
+        python -m prepare_data_meldgraph.prepare_bonn_7T --meld_graph --B0_condition {wildcards.B0}
+        """
+
+checkpoint copy_cambridge_meld_graph:
+    input:
+        ancient('data/meld_graph/cambridge/{B0}/.create.done'),
+    output:
+        directory('data/meld_graph/cambridge/{B0}/input/')
+    localrule: True
+    shell:
+        """
+        python -m prepare_data_meldgraph.prepare_cambridge --meld_graph --B0_condition {wildcards.B0}
+        """
+
+rule meld_graph_segmentation_persubj_uhf:
+    input:
+        ancient('data/meld_graph/{site}/{B0}/input/')
+    output:
+        directory('data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/'),
+        directory('data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/surf_meld'),
+        'data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/scripts/recon-all.done'
+    wildcard_constraints:
+        B0="7T|7T_pTx|7T_CP|7T_FLAIR|7T_pTx_FLAIR|7T_CP_FLAIR"
+    threads: 2
+    resources:
+        runtime="12h"
+    shell:
+        r"""
+        rm -rf data/meld_graph/{wildcards.site}/{wildcards.B0}/output/fs_outputs/{wildcards.subj_id}/
+        export APPTAINER_BINDPATH=data/meld_graph/{wildcards.site}/{wildcards.B0}/:/data,license.txt:/license.txt:ro,meld_license.txt:/meld_license.txt:ro
+        export APPTAINERENV_FS_LICENSE=/license.txt
+        export APPTAINERENV_MELD_LICENSE=/meld_license.txt
+        RULE_TMPDIR="$(mktemp -d $TMPDIR/snakemake-apptainer.XXXXXX)"
+        cleanup() {{
+           rm -rf "$RULE_TMPDIR"
+        }}
+        trap cleanup EXIT INT TERM
+        export APPTAINER_BINDPATH=$APPTAINER_BINDPATH,$RULE_TMPDIR:/tmp
+        apptainer exec --containall meld_graph.sif /bin/bash -c "cd /app && source \$FREESURFER_HOME/FreeSurferEnv.sh && timeout {resources.runtime}m python scripts/new_patient_pipeline/run_script_segmentation.py -id {wildcards.subj_id} --uhf_highres --threads {threads}"                                                     
+        """
+
+
+rule meld_graph_segmentation_persubj_fastsurfer:
+    input:
+        ancient('data/meld_graph/{site}/{B0}/input/')
+    output:
+        directory('data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/'),
+        directory('data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/surf_meld'),
+        'data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/scripts/recon-all.done'
+    wildcard_constraints:
+        B0="3T_fastsurfer|7T_fastsurfer"
+    threads: 2
+    resources:
+        runtime="12h"
+    shell:
+        r"""
+        rm -rf data/meld_graph/{wildcards.site}/{wildcards.B0}/output/fs_outputs/{wildcards.subj_id}/
+        export APPTAINER_BINDPATH=data/meld_graph/{wildcards.site}/{wildcards.B0}/:/data,license.txt:/license.txt:ro,meld_license.txt:/meld_license.txt:ro
+        export APPTAINERENV_FS_LICENSE=/license.txt
+        export APPTAINERENV_MELD_LICENSE=/meld_license.txt
+        RULE_TMPDIR="$(mktemp -d $TMPDIR/snakemake-apptainer.XXXXXX)"
+        cleanup() {{
+           rm -rf "$RULE_TMPDIR"
+        }}
+        trap cleanup EXIT INT TERM
+        export APPTAINER_BINDPATH=$APPTAINER_BINDPATH,$RULE_TMPDIR:/tmp
+        apptainer exec --containall meld_graph.sif /bin/bash -c "cd /app && source \$FREESURFER_HOME/FreeSurferEnv.sh && timeout {resources.runtime}m python scripts/new_patient_pipeline/run_script_segmentation.py -id {wildcards.subj_id} --fastsurfer --use_gpu --threads {threads}"                                                     
+        """
+
+rule meld_graph_segmentation_persubj_3T:
+    input:
+        ancient('data/meld_graph/{site}/{B0}/input/')
+    output:
+        directory('data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/'),
+        directory('data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/surf_meld'),
+        'data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/scripts/recon-all.done'
+    wildcard_constraints:
+        B0="3T|3T_FLAIR|7T_nouhf|7T_CP_nouhf|7T_pTx_nouhf"
+    threads: 2
+    resources:
+        runtime="12h"
+    shell:
+        r"""
+        rm -rf data/meld_graph/{wildcards.site}/{wildcards.B0}/output/fs_outputs/{wildcards.subj_id}/
+        export APPTAINER_BINDPATH=data/meld_graph/{wildcards.site}/{wildcards.B0}/:/data,license.txt:/license.txt:ro,meld_license.txt:/meld_license.txt:ro
+        export APPTAINERENV_FS_LICENSE=/license.txt
+        export APPTAINERENV_MELD_LICENSE=/meld_license.txt
+        RULE_TMPDIR="$(mktemp -d $TMPDIR/snakemake-apptainer.XXXXXX)"
+        cleanup() {{
+           rm -rf "$RULE_TMPDIR"
+        }}
+        trap cleanup EXIT INT TERM
+        export APPTAINER_BINDPATH=$APPTAINER_BINDPATH,$RULE_TMPDIR:/tmp
+        apptainer exec --containall meld_graph.sif /bin/bash -c "cd /app && source \$FREESURFER_HOME/FreeSurferEnv.sh && timeout {resources.runtime}m python scripts/new_patient_pipeline/run_script_segmentation.py -id {wildcards.subj_id} --threads {threads}"                                                     
+        """
+
+def get_subj_ids_copy(wildcards):
+    if wildcards.site == '7T_rory':
+        checkpoints.copy_7T_rory_meld_graph.get(**wildcards).output[0]
+    elif wildcards.site == 'RICE':
+        checkpoints.copy_RICE_meld_graph.get(**wildcards).output[0]
+    elif wildcards.site == 'bonn_7T':
+        checkpoints.copy_bonn_7T_meld_graph.get(**wildcards).output[0]
+    elif wildcards.site == 'cambridge':
+        checkpoints.copy_cambridge_meld_graph.get(**wildcards).output[0]
+    dir = f'data/meld_graph/{wildcards.site}/{wildcards.B0}/input/'
+    return [f for f in os.listdir(dir) if f.startswith('sub-')]
+
+rule meld_graph_segmentation:
+    input:
+        'data/meld_graph/{site}/{B0}/input/',
+        expand('data/meld_graph/{{site}}/{{B0}}/output/fs_outputs/{subj_id}/', subj_id=get_subj_ids_copy),
+        expand('data/meld_graph/{{site}}/{{B0}}/output/fs_outputs/{subj_id}/surf_meld/', subj_id=get_subj_ids_copy),
+        expand('data/meld_graph/{{site}}/{{B0}}/output/fs_outputs/{subj_id}/scripts/recon-all.done', subj_id=get_subj_ids_copy)
+    output:
+        'data/meld_graph/{site}/{B0}/.segmentation.done'
+    localrule: True
+    shell:
+        """
+        date > {output}
+        """
+    
+checkpoint meld_graph_preprocessing:
+    input:
+        'data/meld_graph/{site}/{B0}/.segmentation.done'
+    output:
+        'data/meld_graph/{site}/{B0}/.preprocessing.done'
+    threads: 2
+    shell:
+        # - need to use new_pt_pipeline.py here instead of run_script_preprocessing.py because we
+        #    need to re-run the feature extraction for all subjects into .hdf5 files 
+        # - also use the --skip_prediction flag instead of --harmo_only because the
+        #   latter disables some feature extraction steps that are need for predictions
+        r"""
+        rm -rf data/meld_graph/{wildcards.site}/{wildcards.B0}/output/preprocessed_surf_data
+        rm -rf data/meld_graph/{wildcards.site}/{wildcards.B0}/output/predictions_reports
+        rm -rf data/meld_graph/{wildcards.site}/{wildcards.B0}/output/classifier_outputs
+        export APPTAINER_BINDPATH=data/meld_graph/{wildcards.site}/{wildcards.B0}/:/data,license.txt:/license.txt:ro,meld_license.txt:/meld_license.txt:ro
+        export APPTAINERENV_FS_LICENSE=/license.txt
+        export APPTAINERENV_MELD_LICENSE=/meld_license.txt
+        RULE_TMPDIR="$(mktemp -d $TMPDIR/snakemake-apptainer.XXXXXX)"
+        cleanup() {{
+           rm -rf "$RULE_TMPDIR"
+        }}
+        trap cleanup EXIT INT TERM
+        export APPTAINER_BINDPATH=$APPTAINER_BINDPATH,$RULE_TMPDIR:/tmp
+        apptainer exec --containall meld_graph.sif /bin/bash -c "cd /app && source \$FREESURFER_HOME/FreeSurferEnv.sh && python scripts/new_patient_pipeline/new_pt_pipeline.py -ids input/subjects_list.txt --harmo_code UHF -demos input/demographics_file.csv --skip_prediction --skip_feature_plotting"
+        date > {output}
+        """
+
+rule meld_graph_prediction_persubj:
+    input:
+        'data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/scripts/recon-all.done',
+        'data/meld_graph/{site}/{B0}/.preprocessing.done'
+    output:
+        'data/meld_graph/{site}/{B0}/output/predictions_reports/{subj_id}/reports/MELD_report_{subj_id}.pdf'
+    threads: 3
+    shell:
+        r"""
+        export APPTAINER_BINDPATH=data/meld_graph/{wildcards.site}/{wildcards.B0}/:/data,license.txt:/license.txt:ro,meld_license.txt:/meld_license.txt:ro
+        export APPTAINERENV_FS_LICENSE=/license.txt
+        export APPTAINERENV_MELD_LICENSE=/meld_license.txt
+
+        rm -rf data/meld_graph/{wildcards.site}/{wildcards.B0}/output/predictions_reports/{wildcards.subj_id}/
+        
+        RULE_TMPDIR="$(mktemp -d $TMPDIR/snakemake-apptainer.XXXXXX)"
+        cleanup() {{
+           rm -rf "$RULE_TMPDIR"
+        }}
+        trap cleanup EXIT INT TERM
+        export APPTAINER_BINDPATH=$APPTAINER_BINDPATH,$RULE_TMPDIR:/tmp
+
+        apptainer exec --containall meld_graph.sif /bin/bash -c "cd /app && source \$FREESURFER_HOME/FreeSurferEnv.sh && python scripts/new_patient_pipeline/run_script_prediction.py -id {wildcards.subj_id} --harmo_code UHF -demos input/demographics_file.csv"
+        """
+
+def get_subj_ids_preprocessing(wildcards):
+    checkpoints.meld_graph_preprocessing.get(**wildcards).output[0]
+    dir = f'data/meld_graph/{wildcards.site}/{wildcards.B0}/input/'
+    return [f for f in os.listdir(dir) if f.startswith('sub-')]
+
+rule meld_graph_prediction:
+    input:
+        'data/meld_graph/{site}/{B0}/.preprocessing.done',
+        expand('data/meld_graph/{{site}}/{{B0}}/output/predictions_reports/{subj_id}/reports/MELD_report_{subj_id}.pdf', subj_id=get_subj_ids_preprocessing)
+    output:
+        'data/meld_graph/{site}/{B0}/.prediction.done'
+    localrule: True
+    shell:
+        r"""
+        date > {output}
+        """
+
+checkpoint meld_graph_preprocessing_noharmo:
+    input:
+        'data/meld_graph/{site}/{B0}/.segmentation.done'
+    output:
+        'data/meld_graph_noharmo/{site}/{B0}/.preprocessing.done'
+    threads: 2
+    shell:
+        # copy hardlinks
+        # and delete files that are modified/re-written during the noharmo run 
+        # so that the original files are not changed 
+        r"""
+        rm -rf data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/
+        cp -rld data/meld_graph/{wildcards.site}/{wildcards.B0}/ data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/
+
+        rm -rf data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/output/preprocessed_surf_data
+        rm -rf data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/output/classifier_outputs
+        rm -rf data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/output/predictions_reports
+        rm -rf data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/logs
+
+        rm -f  data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/.preprocessing.done
+        rm -f  data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/.prediction.done
+
+        export APPTAINER_BINDPATH=data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/:/data,license.txt:/license.txt:ro,meld_license.txt:/meld_license.txt:ro
+        export APPTAINERENV_FS_LICENSE=/license.txt
+        export APPTAINERENV_MELD_LICENSE=/meld_license.txt
+        RULE_TMPDIR="$(mktemp -d $TMPDIR/snakemake-apptainer.XXXXXX)"
+        cleanup() {{
+           rm -rf "$RULE_TMPDIR"
+        }}
+        trap cleanup EXIT INT TERM
+        export APPTAINER_BINDPATH=$APPTAINER_BINDPATH,$RULE_TMPDIR:/tmp
+        apptainer exec --containall meld_graph.sif /bin/bash -c "cd /app && source \$FREESURFER_HOME/FreeSurferEnv.sh && python scripts/new_patient_pipeline/new_pt_pipeline.py -ids input/subjects_list.txt --skip_prediction --skip_feature_plotting"
+        date > {output}
+        """
+
+rule meld_graph_prediction_persubj_noharmo:
+    input:
+        'data/meld_graph/{site}/{B0}/output/fs_outputs/{subj_id}/scripts/recon-all.done',
+        'data/meld_graph_noharmo/{site}/{B0}/.preprocessing.done'
+    output:
+        'data/meld_graph_noharmo/{site}/{B0}/output/predictions_reports/{subj_id}/reports/MELD_report_{subj_id}.pdf'
+    threads: 3
+    shell:
+        r"""
+        export APPTAINER_BINDPATH=data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/:/data,license.txt:/license.txt:ro,meld_license.txt:/meld_license.txt:ro
+        export APPTAINERENV_FS_LICENSE=/license.txt
+        export APPTAINERENV_MELD_LICENSE=/meld_license.txt
+
+        rm -rf data/meld_graph_noharmo/{wildcards.site}/{wildcards.B0}/output/predictions_reports/{wildcards.subj_id}/
+
+        RULE_TMPDIR="$(mktemp -d $TMPDIR/snakemake-apptainer.XXXXXX)"
+        cleanup() {{
+           rm -rf "$RULE_TMPDIR"
+        }}
+        trap cleanup EXIT INT TERM
+        export APPTAINER_BINDPATH=$APPTAINER_BINDPATH,$RULE_TMPDIR:/tmp
+        apptainer exec --containall meld_graph.sif /bin/bash -c "cd /app && source \$FREESURFER_HOME/FreeSurferEnv.sh && python scripts/new_patient_pipeline/run_script_prediction.py -id {wildcards.subj_id}"
+        """
+
+def get_subj_ids_preprocessing_noharmo(wildcards):
+    checkpoints.meld_graph_preprocessing_noharmo.get(**wildcards).output[0]
+    dir = f'data/meld_graph/{wildcards.site}/{wildcards.B0}/input/'
+    return [f for f in os.listdir(dir) if f.startswith('sub-')]
+
+rule meld_graph_prediction_noharmo:
+    input:
+        'data/meld_graph_noharmo/{site}/{B0}/.preprocessing.done',
+        expand('data/meld_graph_noharmo/{{site}}/{{B0}}/output/predictions_reports/{subj_id}/reports/MELD_report_{subj_id}.pdf', subj_id=get_subj_ids_preprocessing_noharmo)
+    output:
+        'data/meld_graph_noharmo/{site}/{B0}/.prediction.done'
+    localrule: True
+    shell:
+        r"""
+        date > {output}
+        """
+
+
+rule coreg_lesion_masks:
+    input:
+        'data/raw/{site}/bids/'
+    output:
+        'data/raw/{site}/bids/derivatives/lesion_masks_coreg/.coreg.done'
+    threads: 6
+    shell:
+        """
+        python evaluation_meldgraph/coreg_lesionmasks.py --bids_dir {input} --coreg --threads {threads}
+        date > {output}
+        """
+
+rule lesionmasks:
+    input:
+        'data/raw/bonn_7T/bids/derivatives/lesion_masks_coreg/.coreg.done',
+        'data/raw/7T_rory/bids/derivatives/lesion_masks_coreg/.coreg.done',
+        'data/raw/cambridge/bids/derivatives/lesion_masks_coreg/.coreg.done',
+        'data/raw/RICE/bids/derivatives/lesion_masks_coreg/.coreg.done',
+
+
+datasets = []
+if os.path.exists('data/raw/7T_rory'):
+    datasets.append('7T_rory')
+if os.path.exists('data/raw/RICE'):
+    datasets.append('RICE')
+if os.path.exists('data/raw/bonn_7T'):
+    datasets.append('bonn_7T')
+if os.path.exists('data/raw/cambridge'):
+    datasets.append('cambridge')
+
+rule all_predictions:
+    input:
+        branch('7T_rory' in datasets,then=[
+            'data/meld_graph/7T_rory/7T/.prediction.done',
+            'data/meld_graph/7T_rory/7T_FLAIR/.prediction.done',
+            'data/meld_graph/7T_rory/7T_nouhf/.prediction.done',
+            'data/meld_graph/7T_rory/3T/.prediction.done',
+            'data/meld_graph/7T_rory/3T_FLAIR/.prediction.done',
+
+            'data/meld_graph_noharmo/7T_rory/7T/.prediction.done',
+            'data/meld_graph_noharmo/7T_rory/7T_FLAIR/.prediction.done',
+            'data/meld_graph_noharmo/7T_rory/7T_nouhf/.prediction.done',
+            'data/meld_graph_noharmo/7T_rory/3T/.prediction.done',
+            'data/meld_graph_noharmo/7T_rory/3T_FLAIR/.prediction.done']),
+        branch('RICE' in datasets,then=[
+            'data/meld_graph/RICE/7T/.prediction.done',
+            'data/meld_graph/RICE/7T_FLAIR/.prediction.done',
+            'data/meld_graph/RICE/7T_nouhf/.prediction.done',
+            'data/meld_graph/RICE/3T/.prediction.done',
+            'data/meld_graph/RICE/3T_FLAIR/.prediction.done',
+
+            'data/meld_graph_noharmo/RICE/7T/.prediction.done',
+            'data/meld_graph_noharmo/RICE/7T_FLAIR/.prediction.done',
+            'data/meld_graph_noharmo/RICE/7T_nouhf/.prediction.done',
+            'data/meld_graph_noharmo/RICE/3T/.prediction.done',
+            'data/meld_graph_noharmo/RICE/3T_FLAIR/.prediction.done']),
+        branch('bonn_7T' in datasets,then=[
+            'data/meld_graph/bonn_7T/7T/.prediction.done',
+            'data/meld_graph/bonn_7T/7T_FLAIR/.prediction.done',
+            'data/meld_graph/bonn_7T/7T_nouhf/.prediction.done',
+            'data/meld_graph/bonn_7T/3T/.prediction.done',
+            'data/meld_graph/bonn_7T/3T_FLAIR/.prediction.done',
+
+            'data/meld_graph_noharmo/bonn_7T/7T/.prediction.done',
+            'data/meld_graph_noharmo/bonn_7T/7T_FLAIR/.prediction.done',
+            'data/meld_graph_noharmo/bonn_7T/7T_nouhf/.prediction.done',
+            'data/meld_graph_noharmo/bonn_7T/3T/.prediction.done',
+            'data/meld_graph_noharmo/bonn_7T/3T_FLAIR/.prediction.done']),
+        branch('cambridge' in datasets,then=[
+            'data/meld_graph/cambridge/7T_pTx/.prediction.done',
+            'data/meld_graph/cambridge/7T_pTx_nouhf/.prediction.done',
+            'data/meld_graph/cambridge/7T_pTx_FLAIR/.prediction.done',
+
+            'data/meld_graph_noharmo/cambridge/7T_pTx/.prediction.done',
+            'data/meld_graph_noharmo/cambridge/7T_pTx_nouhf/.prediction.done',
+            'data/meld_graph_noharmo/cambridge/7T_pTx_FLAIR/.prediction.done',
+
+            'data/meld_graph/cambridge/7T_CP/.prediction.done',
+            'data/meld_graph/cambridge/7T_CP_nouhf/.prediction.done',
+            'data/meld_graph/cambridge/7T_CP_FLAIR/.prediction.done',
+
+            'data/meld_graph_noharmo/cambridge/7T_CP/.prediction.done',
+            'data/meld_graph_noharmo/cambridge/7T_CP_nouhf/.prediction.done',
+            'data/meld_graph_noharmo/cambridge/7T_CP_FLAIR/.prediction.done',
+            
+            'data/meld_graph/cambridge/3T/.prediction.done',
+            
+            'data/meld_graph_noharmo/cambridge/3T/.prediction.done']),
+    output:
+        'data/results/.all_predictions.done'
+    localrule: True
+    shell:
+        """
+        date > {output}
+        """
+
+
+rule vol_eval:
+    input:
+        'data/results/.all_predictions.done'
+    output:
+        'data/results/.vol_eval.done'
+    threads: 10
+    default_target: True
+    shell:
+        """
+        python evaluation_meldgraph/vol_eval.py --threads {threads}
+        date > {output}
+        """
