@@ -29,6 +29,7 @@ import os
 import pickle
 import subprocess
 import tempfile
+import itertools
 
 import matplotlib
 import matplotlib.colors as mcolors
@@ -537,9 +538,11 @@ def describe_across_conditions(long_df, conditions, key_col='metric', value_col=
 def load_surf_feature_maps(eval_stats_df):
     """The normalised per-vertex surface features of every subject and condition.
 
-    Returns ({(harmo, analysis_group, site_subj_id, feature): (2, NVERT) array}, cortex_mask),
-    left hemisphere first, right hemisphere second, cached as
+    Returns ({(harmo, analysis_group, site_subj_id, feature): (2, NVERT) array}, cortex_mask,
+    feature_rows), left hemisphere first, right hemisphere second, cached as
     data/results/vol_eval_surf_features_<timestamp>.pkl next to the results the rows come from.
+    feature_rows is the one row of eval_stats_df per (harmo, analysis_group, site_subj_id) the maps
+    were extracted from, so that the caller can merge the rest of the results back onto them.
     """
     results_timestamp = latest_vol_eval_path().split('vol_eval_')[-1].removesuffix('.csv')
 
@@ -605,4 +608,4 @@ def load_surf_feature_maps(eval_stats_df):
             pickle.dump(surf_feature_maps, features_file)
         print(f'{len(surf_feature_maps)} vertexwise maps written for {results_timestamp}.')
 
-    return surf_feature_maps, cortex_mask
+    return surf_feature_maps, cortex_mask, feature_rows
