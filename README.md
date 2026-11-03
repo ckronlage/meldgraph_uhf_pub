@@ -90,12 +90,13 @@ The notebooks in `evaluation_meldgraph/notebooks/` produce the paper outputs:
 |---|---|
 | `01_tables.ipynb` | Table 1 |
 | `02_figure1_cohort_overview.ipynb` | Figure 1 |
-| `03_figure2_supp_fig2_3_sensitivity_specificity.ipynb` | Figure 2, Supplementary Figures 2 and 3 |
+| `03_figure2_supp_fig3_4_7_sensitivity_specificity.ipynb` | Figure 2, Supplementary Figures 3, 4 and 7 |
 | `04_figure3_plot_slices.ipynb` | Figure 3 |
 | `05_figure4_fp_distributions.ipynb` | Figure 4 |
-| `06_supp_fig1_cluster_stats.ipynb` | Supplementary Figure 1 |
-| `07_supp_fig5_gt_label_features.ipynb` | Supplementary Figure 5 |
-| `08_figure5_supp_fig6_feature_maps.ipynb` | Figure 5, Supplementary Figure 6 |
+| `06_supp_fig1_cohort_selection.ipynb` | Supplementary Figure 1 |
+| `07_supp_fig2_cluster_stats.ipynb` | Supplementary Figure 2 |
+| `08_supp_fig6_gt_label_features.ipynb` | Supplementary Figure 6 |
+| `09_figure5_supp_fig8_feature_maps.ipynb` | Figure 5, Supplementary Figure 8 |
 
 `evaluation_meldgraph/vol_eval_plots.py` holds the helpers shared by more than one notebook,
 above all `load_and_prepare_data()`, with which every notebook starts.

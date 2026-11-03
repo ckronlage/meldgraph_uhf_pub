@@ -3,6 +3,7 @@ import re
 import glob
 import datetime
 import difflib
+import functools
 import multiprocessing
 import subprocess
 
@@ -50,10 +51,11 @@ MELD_GRAPH_DIRS = ['data/meld_graph/*/*/', 'data/meld_graph_noharmo/*/*/']
 # vertices per fsaverage_sym hemisphere
 NVERT = 163842
 
-# the Desikan-Killiany parcellation and the cortex label of fsaverage_sym, copied out of the
-# freesurfer container once and then read by every worker process
+# the Desikan-Killiany parcellation, the cortex label and the white surface of fsaverage_sym, copied
+# out of the freesurfer container once and then read by every worker process
 FSAVERAGE_SYM_ANNOT_PATH = 'data/results/fsaverage_sym/lh.aparc.annot'
 FSAVERAGE_SYM_CORTEX_LABEL_PATH = 'data/results/fsaverage_sym/lh.cortex.label'
+FSAVERAGE_SYM_WHITE_PATH = 'data/results/fsaverage_sym/lh.white'
 
 
 def extract_subject_session_from_path(path):
@@ -181,6 +183,22 @@ def remove_clusters_smaller_than(threshold, data, keep_largest=False):
     data_filtered = keep_mask[clusters]
 
     return data_filtered
+
+@functools.lru_cache(maxsize=1)
+def fsaverage_sym_vertex_areas():
+    """Area (mm^2) of every fsaverage_sym vertex on the white surface: a third of each adjacent face.
+
+    The lh mesh also serves the rh, whose data is in the xhemi (lh-like) space.
+    """
+    coords, faces = nib.freesurfer.read_geometry(FSAVERAGE_SYM_WHITE_PATH)
+    face_areas = 0.5 * np.linalg.norm(np.cross(coords[faces[:, 1]] - coords[faces[:, 0]],
+                                               coords[faces[:, 2]] - coords[faces[:, 0]]), axis=1)
+    return np.bincount(faces.ravel(), weights=np.repeat(face_areas / 3, 3), minlength=NVERT)
+
+def weighted_dice(mask_a, mask_b, weights):
+    """Dice of two boolean vertex masks, each vertex counting with its weight."""
+    denominator = weights[mask_a].sum() + weights[mask_b].sum()
+    return 2 * weights[mask_a & mask_b].sum() / denominator if denominator > 0 else np.nan
 
 def read_surf_features(meld_graph_base_dir, subject_id, variants=None):
     """Returns {(variant, hemi, feature): vertexwise array}, or None
@@ -404,7 +422,7 @@ def evaluate_prediction(subject_id,
         if num_gt_clusters == 0:
             # no ground truth clusters, all predicted clusters are false positives
             fp_clusters += 1
-            pred_indices_fp = np.concatenate([pred_indices_fp, np.unique(pred_data_orig[pred_cluster_mask])])
+            pred_indices_fp.append(pred_cluster_id)
             continue
 
         is_true_positive = False
@@ -441,10 +459,10 @@ def evaluate_prediction(subject_id,
 
         if is_true_positive:
             tp_clusters += 1
-            pred_indices_tp = np.concatenate([pred_indices_tp, np.unique(pred_data_orig[pred_cluster_mask])])
+            pred_indices_tp.append(pred_cluster_id)
         else:
             fp_clusters += 1
-            pred_indices_fp = np.concatenate([pred_indices_fp, np.unique(pred_data_orig[pred_cluster_mask])])
+            pred_indices_fp.append(pred_cluster_id)
 
 
     tp_patient = (tp_clusters > 0) if group == 'patient' else np.nan
@@ -470,12 +488,13 @@ def evaluate_prediction(subject_id,
             surf_pred = surf_pred_imgs[hemi]
             surf_pred_data = surf_pred.get_fdata()
 
-            # in surf_pred_lh_data, replace values in pred_indices_tp with 2, values in pred_indices_fp with 1
+            # in surf_pred_lh_data, replace values in pred_indices_tp with 2, values in pred_indices_fp with 1;
+            # the surface carries cluster i as i or 100*i, as the volume does
             labeled_surf_pred_data = np.zeros_like(surf_pred_data)
             for idx in pred_indices_tp:
-                labeled_surf_pred_data[surf_pred_data == idx] = 2
+                labeled_surf_pred_data[(surf_pred_data == idx) | (surf_pred_data == 100 * idx)] = 2
             for idx in pred_indices_fp:
-                labeled_surf_pred_data[surf_pred_data == idx] = 1
+                labeled_surf_pred_data[(surf_pred_data == idx) | (surf_pred_data == 100 * idx)] = 1
 
             labeled_surf = nib.Nifti1Image(labeled_surf_pred_data, surf_pred.affine)
             out_path = f'{labeled_pred_surfs_output_folder}/{subject_id}/{hemi}.prediction.mgh'
@@ -515,6 +534,18 @@ def evaluate_prediction(subject_id,
         cortex_mask = np.zeros(NVERT, dtype=bool)
         cortex_mask[nib.freesurfer.io.read_label(FSAVERAGE_SYM_CORTEX_LABEL_PATH)] = True
 
+        # the fsaverage_sym ground truth of gt_to_fsav_surf(); absent for controls and for patients
+        # without a 3T reconstruction, whose clusters then get no surface dice
+        gt_masks = {}
+        if gt_surf_fsav_folder is not None:
+            for hemi in ['lh', 'rh']:
+                gt_surf_fsav_path = f'{gt_surf_fsav_folder}/{hemi}.gt.fsaverage_sym.mgh'
+                if os.path.exists(gt_surf_fsav_path):
+                    gt_masks[hemi] = (nib.load(gt_surf_fsav_path).get_fdata().squeeze() > 0) & cortex_mask
+        dice_weights = {'vertex': np.ones(NVERT)}
+        if gt_masks:
+            dice_weights['area'] = fsaverage_sym_vertex_areas()
+
         cluster_records = []
         for cluster_id in pred_cluster_ids:
             # a cluster lives in one hemisphere only, so pooling both is safe; the surface carries
@@ -529,6 +560,18 @@ def evaluate_prediction(subject_id,
                                        'unknown'),
                       'hemi': ','.join(hemi for hemi, mask in cluster_masks.items() if mask.any()),
                       'n_vertices': sum(mask.sum() for mask in cluster_masks.values())}
+
+            # dice against the ground truth of the hemisphere(s) the cluster lives in; 0 for a
+            # cluster that overlaps no ground truth vertex
+            cluster_hemis = [hemi for hemi, mask in cluster_masks.items() if mask.any()]
+            for weighting in ['vertex', 'area']:
+                record[f'dice_surf_{weighting}'] = np.nan
+                if gt_masks and cluster_hemis:
+                    record[f'dice_surf_{weighting}'] = weighted_dice(
+                        np.concatenate([cluster_masks[hemi] for hemi in cluster_hemis]),
+                        np.concatenate([gt_masks.get(hemi, np.zeros(NVERT, dtype=bool))
+                                        for hemi in cluster_hemis]),
+                        np.tile(dice_weights[weighting], len(cluster_hemis)))
 
             for variant in SURF_FEATURE_VARIANTS:
                 for feature_name in SURF_FEATURE_NAMES:
@@ -665,16 +708,18 @@ def gt_to_fsav_surf(gt_paths_3T_df, output_folder, min_cluster_size_gt=20):
 
 
 def copy_fsaverage_sym_labels():
-    """Copy the Desikan-Killiany annotation and the cortex label of fsaverage_sym out of the
-    freesurfer container."""
-    for label_path in [FSAVERAGE_SYM_ANNOT_PATH, FSAVERAGE_SYM_CORTEX_LABEL_PATH]:
-        if os.path.exists(label_path):
+    """Copy the Desikan-Killiany annotation, the cortex label and the white surface of fsaverage_sym
+    out of the freesurfer container."""
+    for subdir, target_path in [('label', FSAVERAGE_SYM_ANNOT_PATH),
+                                ('label', FSAVERAGE_SYM_CORTEX_LABEL_PATH),
+                                ('surf', FSAVERAGE_SYM_WHITE_PATH)]:
+        if os.path.exists(target_path):
             continue
 
-        os.makedirs(os.path.dirname(label_path), exist_ok=True)
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
         cmd = (f'apptainer run freesurfer_8.1.0.sif /bin/bash -c '
-               f'"cp \\$FREESURFER_HOME/subjects/fsaverage_sym/label/'
-               f'{os.path.basename(label_path)} {label_path}"')
+               f'"cp \\$FREESURFER_HOME/subjects/fsaverage_sym/{subdir}/'
+               f'{os.path.basename(target_path)} {target_path}"')
         subprocess.run(cmd, shell=True, check=True)
 
 
@@ -780,9 +825,11 @@ def vol_eval_all(threads=1):
 
     # filter to only include only rows where either group is 'control' or a
     # ground truth path exists (i.e. exclude patients without ground truth)
-    input_pred_gt_paths_df = input_pred_gt_paths_df[((input_pred_gt_paths_df['group'] == 'control') | 
-                                                     (pd.notna(input_pred_gt_paths_df['ground_truth_path'])))]
-
+    #input_pred_gt_paths_df = input_pred_gt_paths_df[((input_pred_gt_paths_df['group'] == 'control') | 
+    #                                                 (pd.notna(input_pred_gt_paths_df['ground_truth_path'])))]
+    input_pred_gt_paths_df = input_pred_gt_paths_df[((input_pred_gt_paths_df['group'] == 'control') |
+                                                    (pd.notna(input_pred_gt_paths_df['ground_truth_path'])) |
+                                                    (pd.isna(input_pred_gt_paths_df['prediction_path'])))]
 
     # use 'B0_condition' == '3T' to project volume ground truths to fsaverage_sym surface space
     gt_paths_3T_df = input_pred_gt_paths_df[((input_pred_gt_paths_df['B0_condition'] == '3T') & 

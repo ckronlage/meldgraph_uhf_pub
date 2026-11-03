@@ -4,20 +4,21 @@ Everything that is used by a single notebook only stays in that notebook, next t
 call site. The exceptions are:
 
   load_and_prepare_data       -> every notebook
-  select_fcd_control_groups   -> 01 (which reports the subject counts before this selection)
+  select_fcd_control_groups   -> 01 and 06 (which report the subject counts before this selection)
   filter_to_common_subjects   -> 03 (the performance table) and 05 (the false-positive maps)
-  latest_vol_eval_path        -> the loader, and 06 for the per-cluster file of the same run
+  latest_vol_eval_path        -> the loader, 06 for the B0_conditions of each subject before the
+                                 3T/7T matching, and 07 for the per-cluster file of the same run
   the analysis group names    -> every notebook
   the colour scheme
    (harmo_labels, main_group_hue_family, harmo_saturation, _with_saturation, _with_value)
                               -> 03 (the sensitivity/specificity bars) and, through the
-                                 six-condition colours below, 06, 07 and 08
-  plot_on_surface             -> 05 (Figure 4) and 08 (Figure 5, Supp. Figure 6)
+                                 six-condition colours below, 07, 08 and 09
+  plot_on_surface             -> 05 (Figure 4) and 09 (Figure 5, Supp. Figure 8)
   the six conditions and their colours, and surf_feature_names
-                              -> 06, 07 and 08
+                              -> 07, 08 and 09
   friedman/kruskal/describe_across_conditions
-                              -> 06 (cluster metrics) and 07 (features in the lesion label)
-  load_surf_feature_maps      -> 07 and 08
+                              -> 07 (cluster metrics) and 08 (features in the lesion label)
+  load_surf_feature_maps      -> 08 and 09
 
 The notebooks add this folder to sys.path and import from here by module name, as the
 AID-HS notebooks do with evaluation_hs/hs_plots.py.
@@ -139,7 +140,7 @@ def load_and_prepare_data(select_fcd_groups=True):
     # after quality control, drop KCL sub-RICE075
     eval_stats_df = eval_stats_df[eval_stats_df['site_subj_id'] != 'KCL_sub-RICE075']
 
-    if '7T_CP' in MAIN_7T_ADAPTED_CONDITIONS:
+    if '7T_pTx' in MAIN_7T_ADAPTED_CONDITIONS:
         eval_stats_df.loc[eval_stats_df['site'] == 'Cambridge', '7T_T1w_pTx'] = 'UP'
         # update the pTx mode to UP for Cambridge subjects if 7T_pTx is in the main analysis
 
